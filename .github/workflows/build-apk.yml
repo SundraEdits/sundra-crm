@@ -1,0 +1,107 @@
+name: Build Sundra Client CRM APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Sundra_Client_CRM_Project.zip'
+      - 'android-project/**'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Prepare project (safe ZIP extraction)
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/project"
+          rm -rf "$WORK"
+          mkdir -p "$WORK" "$GITHUB_WORKSPACE/build-logs"
+
+          if [ -f Sundra_Client_CRM_Project.zip ]; then
+            echo "Using Sundra_Client_CRM_Project.zip"
+            if unzip -Z1 Sundra_Client_CRM_Project.zip | grep -Eq '(^/|^[A-Za-z]:|(^|/)\.\.(/|$))'; then
+              echo "::error::ZIP contains unsafe paths (absolute or ..). Refusing to extract."
+              exit 1
+            fi
+            unzip -q Sundra_Client_CRM_Project.zip -d "$WORK"
+            if [ -n "$(find "$WORK" -type l -print -quit)" ]; then
+              echo "::error::ZIP contains symbolic links. Refusing to build."
+              exit 1
+            fi
+          elif [ -d android-project ]; then
+            echo "ZIP not found; using android-project/ folder from the repository"
+            mkdir -p "$WORK/android-project"
+            cp -a android-project/. "$WORK/android-project/"
+          else
+            echo "::error::Sundra_Client_CRM_Project.zip is missing from the repository root (and no android-project/ folder exists)."
+            exit 1
+          fi
+
+          ROOT="$(find "$WORK" -maxdepth 4 \( -name settings.gradle.kts -o -name settings.gradle \) -print | head -n 1 | xargs -r dirname)"
+          if [ -z "$ROOT" ] || [ ! -f "$ROOT/app/build.gradle.kts" -a ! -f "$ROOT/app/build.gradle" ]; then
+            echo "::error::Could not find the Android Gradle project root (settings.gradle.kts + app/ module)."
+            exit 1
+          fi
+          echo "Project root: $ROOT"
+          echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          gradle --no-daemon --stacktrace assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/build-logs/gradle-build.log"
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find "$PROJECT_ROOT" -path '*/build/outputs/apk/debug/*.apk' -print | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "::error::Gradle finished but no debug APK was produced."
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/SundraEditsCRM-debug.apk"
+          ls -l "$GITHUB_WORKSPACE/dist"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SundraEditsCRM-debug-apk
+          path: dist/SundraEditsCRM-debug.apk
+          if-no-files-found: error
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build-logs/
+            ${{ runner.temp }}/project/**/build/reports/**
+          if-no-files-found: warn
