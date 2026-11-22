@@ -1,3 +1,4 @@
+
 name: Build Sundra Client CRM APK
 
 on:
@@ -36,7 +37,7 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Prepare project and fix Kotlin errors
+      - name: Extract ZIP safely
         shell: bash
         run: |
           set -euo pipefail
@@ -45,9 +46,7 @@ jobs:
           rm -rf "$WORK"
           mkdir -p "$WORK" "$GITHUB_WORKSPACE/build-logs"
 
-          # Extract project ZIP safely
           if [ -f Sundra_Client_CRM_Project.zip ]; then
-            echo "Using project ZIP"
 
             if unzip -Z1 Sundra_Client_CRM_Project.zip | grep -Eq '(^/|^[A-Za-z]:|(^|/)\.\.(/|$))'; then
               echo "::error::Unsafe ZIP paths detected"
@@ -56,21 +55,18 @@ jobs:
 
             unzip -q Sundra_Client_CRM_Project.zip -d "$WORK"
 
-            if [ -n "$(find "$WORK" -type l -print -quit)" ]; then
-              echo "::error::ZIP contains symbolic links"
-              exit 1
-            fi
-
           elif [ -d android-project ]; then
-            echo "Using android-project folder"
-            mkdir -p "$WORK/android-project"
-            cp -a android-project/. "$WORK/android-project/"
+            cp -a android-project "$WORK/"
           else
-            echo "::error::Project ZIP or android-project folder missing"
+            echo "::error::Project ZIP missing"
             exit 1
           fi
 
-          # Locate Android project root
+          if [ -n "$(find "$WORK" -type l -print -quit)" ]; then
+            echo "::error::ZIP contains symbolic links"
+            exit 1
+          fi
+
           ROOT="$(find "$WORK" -maxdepth 5 \( -name settings.gradle.kts -o -name settings.gradle \) -print | head -n 1 | xargs -r dirname)"
 
           if [ -z "$ROOT" ]; then
@@ -79,79 +75,160 @@ jobs:
           fi
 
           if [ ! -f "$ROOT/app/build.gradle.kts" ] && [ ! -f "$ROOT/app/build.gradle" ]; then
-            echo "::error::Android app module not found"
+            echo "::error::App module not found"
             exit 1
           fi
 
-          echo "Project root: $ROOT"
-
-          # Fix Glass.kt
-          GLASS="$ROOT/app/src/main/java/com/sundraedits/crm/ui/Glass.kt"
-
-          if [ -f "$GLASS" ]; then
-            python3 - "$GLASS" <<'PY'
-          import sys
-
-          path = sys.argv[1]
-
-          with open(path, "r", encoding="utf-8") as f:
-              text = f.read()
-
-          # Replace matchParentSize with fillMaxSize
-          text = text.replace(".matchParentSize()", ".fillMaxSize()")
-
-          # Remove old matchParentSize import
-          text = text.replace(
-              "import androidx.compose.foundation.layout.matchParentSize\n",
-              ""
-          )
-
-          # Ensure fillMaxSize import exists
-          if "import androidx.compose.foundation.layout.fillMaxSize" not in text:
-              text = text.replace(
-                  "import androidx.compose.foundation.layout.Box\n",
-                  "import androidx.compose.foundation.layout.Box\n"
-                  "import androidx.compose.foundation.layout.fillMaxSize\n"
-              )
-
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(text)
-
-          print("Glass.kt patched")
-          PY
-          fi
-
-          # Fix Settings.kt
-          SETTINGS="$ROOT/app/src/main/java/com/sundraedits/crm/ui/Settings.kt"
-
-          if [ -f "$SETTINGS" ]; then
-            python3 - "$SETTINGS" <<'PY'
-          import sys
-
-          path = sys.argv[1]
-
-          with open(path, "r", encoding="utf-8") as f:
-              text = f.read()
-
-          # Add missing dp import
-          if "import androidx.compose.ui.unit.dp" not in text:
-              text = text.replace(
-                  "import androidx.compose.ui.unit.sp\n",
-                  "import androidx.compose.ui.unit.sp\n"
-                  "import androidx.compose.ui.unit.dp\n"
-              )
-
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(text)
-
-          print("Settings.kt patched")
-          PY
-          fi
-
-          # Save project root for next steps
           echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
 
-      - name: Build debug APK
+      - name: Fix Kotlin files and Service Picker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="$PROJECT_ROOT"
+          SRC="$ROOT/app/src/main/java/com/sundraedits/crm/ui"
+
+          python3 - "$SRC" <<'PY'
+          import sys
+          import os
+          import re
+
+          src = sys.argv[1]
+
+          glass = os.path.join(src, "Glass.kt")
+          settings = os.path.join(src, "Settings.kt")
+
+          # Fix Glass.kt
+          if os.path.exists(glass):
+              with open(glass, "r", encoding="utf-8") as f:
+                  text = f.read()
+
+              text = text.replace(
+                  "import androidx.compose.foundation.layout.matchParentSize\n",
+                  ""
+              )
+
+              text = text.replace(
+                  ".matchParentSize()",
+                  ".fillMaxSize()"
+              )
+
+              if "import androidx.compose.foundation.layout.fillMaxSize" not in text:
+                  text = text.replace(
+                      "import androidx.compose.foundation.layout.Box\n",
+                      "import androidx.compose.foundation.layout.Box\n"
+                      "import androidx.compose.foundation.layout.fillMaxSize\n"
+                  )
+
+              with open(glass, "w", encoding="utf-8") as f:
+                  f.write(text)
+
+              print("Glass.kt build fix applied")
+
+          # Fix Settings.kt missing dp import
+          if os.path.exists(settings):
+              with open(settings, "r", encoding="utf-8") as f:
+                  text = f.read()
+
+              if "import androidx.compose.ui.unit.dp" not in text:
+                  text = text.replace(
+                      "import androidx.compose.ui.unit.sp\n",
+                      "import androidx.compose.ui.unit.sp\n"
+                      "import androidx.compose.ui.unit.dp\n"
+                  )
+
+              with open(settings, "w", encoding="utf-8") as f:
+                  f.write(text)
+
+              print("Settings.kt dp import checked")
+
+          # Improve Service Picker tap handling
+          if os.path.exists(glass):
+              with open(glass, "r", encoding="utf-8") as f:
+                  text = f.read()
+
+              start_marker = "/** Generic glass bottom-sheet selector used for services and statuses. */"
+              end_marker = "@Composable\nfun ConfirmDialog"
+
+              start = text.find(start_marker)
+              end = text.find(end_marker, start)
+
+              if start != -1 and end != -1:
+                  new_picker = '''/** Generic selector with reliable full-row tap handling. */
+          @Composable
+          fun <T> PickerSheet(
+              title: String,
+              options: List<T>,
+              selected: T?,
+              label: (T) -> String,
+              onPick: (T) -> Unit,
+              onDismiss: () -> Unit,
+              subtitle: (T) -> String? = { null },
+              tint: (T) -> Color = { Color.Transparent }
+          ) {
+              ModalBottomSheet(
+                  onDismissRequest = onDismiss,
+                  sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                  containerColor = Ivory
+              ) {
+                  Column(
+                      Modifier
+                          .padding(horizontal = 20.dp)
+                          .padding(bottom = 24.dp)
+                          .navigationBarsPadding(),
+                      verticalArrangement = Arrangement.spacedBy(12.dp)
+                  ) {
+                      Text(title, style = MaterialTheme.typography.headlineSmall, color = Ink)
+
+                      options.forEach { opt ->
+                          Row(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .clip(RoundedCornerShape(24.dp))
+                                  .background(tint(opt).copy(alpha = 0.45f))
+                                  .clickable { onPick(opt) }
+                                  .padding(18.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Column(Modifier.weight(1f)) {
+                                  Text(
+                                      label(opt),
+                                      fontWeight = FontWeight.SemiBold,
+                                      color = Ink
+                                  )
+                                  subtitle(opt)?.let {
+                                      Text(it, fontSize = 12.sp, color = Taupe)
+                                  }
+                              }
+
+                              if (opt == selected) {
+                                  Icon(
+                                      Icons.Default.Check,
+                                      contentDescription = "Selected",
+                                      tint = Gold
+                                  )
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+      }
+
+      '''
+
+                  text = text[:start] + new_picker + text[end:]
+
+                  with open(glass, "w", encoding="utf-8") as f:
+                      f.write(text)
+
+                  print("Service Picker tap fix applied")
+              else:
+                  print("Picker markers not found; original picker retained")
+          PY
+
+      - name: Build Debug APK
         shell: bash
         run: |
           set -euo pipefail
@@ -178,7 +255,7 @@ jobs:
 
           ls -lh "$GITHUB_WORKSPACE/dist"
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: SundraEditsCRM-debug-apk
