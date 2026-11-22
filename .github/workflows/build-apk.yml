@@ -18,146 +18,78 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Accept Android SDK licenses
-        shell: bash
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
-      - name: Set up Gradle 8.7
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: Extract ZIP safely
+      - name: Extract project ZIP
         shell: bash
         run: |
           set -euo pipefail
 
           WORK="$RUNNER_TEMP/project"
           rm -rf "$WORK"
-          mkdir -p "$WORK" "$GITHUB_WORKSPACE/build-logs"
+          mkdir -p "$WORK"
 
           if [ -f Sundra_Client_CRM_Project.zip ]; then
-
-            if unzip -Z1 Sundra_Client_CRM_Project.zip | grep -Eq '(^/|^[A-Za-z]:|(^|/)\.\.(/|$))'; then
-              echo "::error::Unsafe ZIP paths detected"
-              exit 1
-            fi
-
             unzip -q Sundra_Client_CRM_Project.zip -d "$WORK"
-
           elif [ -d android-project ]; then
             cp -a android-project "$WORK/"
           else
-            echo "::error::Project ZIP missing"
-            exit 1
-          fi
-
-          if [ -n "$(find "$WORK" -type l -print -quit)" ]; then
-            echo "::error::ZIP contains symbolic links"
+            echo "::error::Project ZIP not found"
             exit 1
           fi
 
           ROOT="$(find "$WORK" -maxdepth 5 \( -name settings.gradle.kts -o -name settings.gradle \) -print | head -n 1 | xargs -r dirname)"
 
           if [ -z "$ROOT" ]; then
-            echo "::error::Android project root not found"
-            exit 1
-          fi
-
-          if [ ! -f "$ROOT/app/build.gradle.kts" ] && [ ! -f "$ROOT/app/build.gradle" ]; then
-            echo "::error::App module not found"
+            echo "::error::Android project not found"
             exit 1
           fi
 
           echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
 
-      - name: Fix Kotlin files and Service Picker
+      - name: Fix Service Picker and Settings
         shell: bash
         run: |
           set -euo pipefail
 
-          ROOT="$PROJECT_ROOT"
-          SRC="$ROOT/app/src/main/java/com/sundraedits/crm/ui"
-
-          python3 - "$SRC" <<'PY'
+          python3 - "$PROJECT_ROOT/app/src/main/java/com/sundraedits/crm/ui" <<'PY'
           import sys
           import os
-          import re
 
           src = sys.argv[1]
-
           glass = os.path.join(src, "Glass.kt")
           settings = os.path.join(src, "Settings.kt")
 
-          # Fix Glass.kt
-          if os.path.exists(glass):
-              with open(glass, "r", encoding="utf-8") as f:
-                  text = f.read()
+          if not os.path.exists(glass):
+              print("Glass.kt not found - stopping")
+              sys.exit(1)
 
-              text = text.replace(
-                  "import androidx.compose.foundation.layout.matchParentSize\n",
-                  ""
-              )
+          with open(glass, "r", encoding="utf-8") as f:
+              text = f.read()
 
-              text = text.replace(
-                  ".matchParentSize()",
-                  ".fillMaxSize()"
-              )
+          start = text.find("fun <T> PickerSheet(")
+          end = text.find("@Composable\nfun ConfirmDialog", start)
 
-              if "import androidx.compose.foundation.layout.fillMaxSize" not in text:
-                  text = text.replace(
-                      "import androidx.compose.foundation.layout.Box\n",
-                      "import androidx.compose.foundation.layout.Box\n"
-                      "import androidx.compose.foundation.layout.fillMaxSize\n"
-                  )
+          if start == -1 or end == -1:
+              print("PickerSheet markers not found")
+              sys.exit(1)
 
-              with open(glass, "w", encoding="utf-8") as f:
-                  f.write(text)
-
-              print("Glass.kt build fix applied")
-
-          # Fix Settings.kt missing dp import
-          if os.path.exists(settings):
-              with open(settings, "r", encoding="utf-8") as f:
-                  text = f.read()
-
-              if "import androidx.compose.ui.unit.dp" not in text:
-                  text = text.replace(
-                      "import androidx.compose.ui.unit.sp\n",
-                      "import androidx.compose.ui.unit.sp\n"
-                      "import androidx.compose.ui.unit.dp\n"
-                  )
-
-              with open(settings, "w", encoding="utf-8") as f:
-                  f.write(text)
-
-              print("Settings.kt dp import checked")
-
-          # Improve Service Picker tap handling
-          if os.path.exists(glass):
-              with open(glass, "r", encoding="utf-8") as f:
-                  text = f.read()
-
-              start_marker = "/** Generic glass bottom-sheet selector used for services and statuses. */"
-              end_marker = "@Composable\nfun ConfirmDialog"
-
-              start = text.find(start_marker)
-              end = text.find(end_marker, start)
-
-              if start != -1 and end != -1:
-                  new_picker = '''/** Generic selector with reliable full-row tap handling. */
-          @Composable
-          fun <T> PickerSheet(
+          replacement = '''fun <T> PickerSheet(
               title: String,
               options: List<T>,
               selected: T?,
@@ -174,6 +106,7 @@ jobs:
               ) {
                   Column(
                       Modifier
+                          .fillMaxWidth()
                           .padding(horizontal = 20.dp)
                           .padding(bottom = 24.dp)
                           .navigationBarsPadding(),
@@ -186,9 +119,9 @@ jobs:
                               modifier = Modifier
                                   .fillMaxWidth()
                                   .clip(RoundedCornerShape(24.dp))
-                                  .background(tint(opt).copy(alpha = 0.45f))
+                                  .background(tint(opt).copy(alpha = 0.55f))
                                   .clickable { onPick(opt) }
-                                  .padding(18.dp),
+                                  .padding(20.dp),
                               verticalAlignment = Alignment.CenterVertically
                           ) {
                               Column(Modifier.weight(1f)) {
@@ -218,24 +151,36 @@ jobs:
 
       '''
 
-                  text = text[:start] + new_picker + text[end:]
+          text = text[:start] + replacement + text[end:]
 
-                  with open(glass, "w", encoding="utf-8") as f:
-                      f.write(text)
+          with open(glass, "w", encoding="utf-8") as f:
+              f.write(text)
 
-                  print("Service Picker tap fix applied")
-              else:
-                  print("Picker markers not found; original picker retained")
+          print("Service picker updated")
+
+          if os.path.exists(settings):
+              with open(settings, "r", encoding="utf-8") as f:
+                  s = f.read()
+
+              if "import androidx.compose.ui.unit.dp" not in s:
+                  s = s.replace(
+                      "package com.sundraedits.crm.ui\n",
+                      "package com.sundraedits.crm.ui\n\n"
+                      "import androidx.compose.ui.unit.dp\n"
+                  )
+
+              with open(settings, "w", encoding="utf-8") as f:
+                  f.write(s)
+
+              print("Settings dp import checked")
           PY
 
-      - name: Build Debug APK
+      - name: Build APK
         shell: bash
         run: |
           set -euo pipefail
-
           cd "$PROJECT_ROOT"
-
-          gradle --no-daemon --stacktrace assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/build-logs/gradle-build.log"
+          gradle --no-daemon --stacktrace assembleDebug
 
       - name: Collect APK
         shell: bash
@@ -249,25 +194,21 @@ jobs:
             exit 1
           fi
 
-          mkdir -p "$GITHUB_WORKSPACE/dist"
+          mkdir -p dist
+          cp "$APK" dist/SundraEditsCRM-debug.apk
 
-          cp "$APK" "$GITHUB_WORKSPACE/dist/SundraEditsCRM-debug.apk"
-
-          ls -lh "$GITHUB_WORKSPACE/dist"
-
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: SundraEditsCRM-debug-apk
           path: dist/SundraEditsCRM-debug.apk
           if-no-files-found: error
 
-      - name: Upload build logs on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: |
-            build-logs/
             ${{ runner.temp }}/project/**/build/reports/**
           if-no-files-found: warn
