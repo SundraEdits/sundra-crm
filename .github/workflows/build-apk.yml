@@ -18,184 +18,110 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Setup JDK 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Accept Android SDK licenses
+        shell: bash
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
-      - name: Setup Gradle
+      - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: Extract project ZIP
+      - name: Prepare project
         shell: bash
         run: |
           set -euo pipefail
-
           WORK="$RUNNER_TEMP/project"
           rm -rf "$WORK"
-          mkdir -p "$WORK"
+          mkdir -p "$WORK" "$GITHUB_WORKSPACE/build-logs"
 
           if [ -f Sundra_Client_CRM_Project.zip ]; then
             unzip -q Sundra_Client_CRM_Project.zip -d "$WORK"
           elif [ -d android-project ]; then
-            cp -a android-project "$WORK/"
+            mkdir -p "$WORK/android-project"
+            cp -a android-project/. "$WORK/android-project/"
           else
-            echo "::error::Project ZIP not found"
+            echo "::error::Project ZIP missing"
             exit 1
           fi
 
           ROOT="$(find "$WORK" -maxdepth 5 \( -name settings.gradle.kts -o -name settings.gradle \) -print | head -n 1 | xargs -r dirname)"
 
           if [ -z "$ROOT" ]; then
-            echo "::error::Android project not found"
+            echo "::error::Android project root not found"
             exit 1
           fi
 
           echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
 
-      - name: Fix Service Picker and Settings
+      - name: Patch picker click target
         shell: bash
         run: |
           set -euo pipefail
+          GLASS="$PROJECT_ROOT/app/src/main/java/com/sundraedits/crm/ui/Glass.kt"
+          SETTINGS="$PROJECT_ROOT/app/src/main/java/com/sundraedits/crm/ui/Settings.kt"
 
-          python3 - "$PROJECT_ROOT/app/src/main/java/com/sundraedits/crm/ui" <<'PY'
+          python3 - "$GLASS" "$SETTINGS" <<'PY'
           import sys
-          import os
+          from pathlib import Path
 
-          src = sys.argv[1]
-          glass = os.path.join(src, "Glass.kt")
-          settings = os.path.join(src, "Settings.kt")
+          glass = Path(sys.argv[1])
+          settings = Path(sys.argv[2])
 
-          if not os.path.exists(glass):
-              print("Glass.kt not found - stopping")
-              sys.exit(1)
+          s = glass.read_text(encoding="utf-8")
 
-          with open(glass, "r", encoding="utf-8") as f:
-              text = f.read()
+          old = 'GlassCard(Modifier.fillMaxWidth(), onClick = { onPick(opt) }, tint = tint(opt)) {'
 
-          start = text.find("fun <T> PickerSheet(")
-          end = text.find("@Composable\nfun ConfirmDialog", start)
+          new = 'Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(tint(opt).copy(alpha = 0.55f)).clickable { onPick(opt) }.padding(16.dp)) {'
 
-          if start == -1 or end == -1:
-              print("PickerSheet markers not found")
-              sys.exit(1)
+          if old not in s:
+              raise SystemExit("Picker source pattern not found; no patch applied")
 
-          replacement = '''fun <T> PickerSheet(
-              title: String,
-              options: List<T>,
-              selected: T?,
-              label: (T) -> String,
-              onPick: (T) -> Unit,
-              onDismiss: () -> Unit,
-              subtitle: (T) -> String? = { null },
-              tint: (T) -> Color = { Color.Transparent }
-          ) {
-              ModalBottomSheet(
-                  onDismissRequest = onDismiss,
-                  sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                  containerColor = Ivory
-              ) {
-                  Column(
-                      Modifier
-                          .fillMaxWidth()
-                          .padding(horizontal = 20.dp)
-                          .padding(bottom = 24.dp)
-                          .navigationBarsPadding(),
-                      verticalArrangement = Arrangement.spacedBy(12.dp)
-                  ) {
-                      Text(title, style = MaterialTheme.typography.headlineSmall, color = Ink)
+          glass.write_text(s.replace(old, new, 1), encoding="utf-8")
 
-                      options.forEach { opt ->
-                          Row(
-                              modifier = Modifier
-                                  .fillMaxWidth()
-                                  .clip(RoundedCornerShape(24.dp))
-                                  .background(tint(opt).copy(alpha = 0.55f))
-                                  .clickable { onPick(opt) }
-                                  .padding(20.dp),
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              Column(Modifier.weight(1f)) {
-                                  Text(
-                                      label(opt),
-                                      fontWeight = FontWeight.SemiBold,
-                                      color = Ink
-                                  )
-                                  subtitle(opt)?.let {
-                                      Text(it, fontSize = 12.sp, color = Taupe)
-                                  }
-                              }
+          if settings.exists():
+              t = settings.read_text(encoding="utf-8")
 
-                              if (opt == selected) {
-                                  Icon(
-                                      Icons.Default.Check,
-                                      contentDescription = "Selected",
-                                      tint = Gold
-                                  )
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-      }
-
-      '''
-
-          text = text[:start] + replacement + text[end:]
-
-          with open(glass, "w", encoding="utf-8") as f:
-              f.write(text)
-
-          print("Service picker updated")
-
-          if os.path.exists(settings):
-              with open(settings, "r", encoding="utf-8") as f:
-                  s = f.read()
-
-              if "import androidx.compose.ui.unit.dp" not in s:
-                  s = s.replace(
+              if "import androidx.compose.ui.unit.dp" not in t:
+                  t = t.replace(
                       "package com.sundraedits.crm.ui\n",
-                      "package com.sundraedits.crm.ui\n\n"
-                      "import androidx.compose.ui.unit.dp\n"
+                      "package com.sundraedits.crm.ui\n\nimport androidx.compose.ui.unit.dp\n",
+                      1
                   )
+                  settings.write_text(t, encoding="utf-8")
 
-              with open(settings, "w", encoding="utf-8") as f:
-                  f.write(s)
-
-              print("Settings dp import checked")
+          print("Picker patch applied")
           PY
 
-      - name: Build APK
+      - name: Build debug APK
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_ROOT"
-          gradle --no-daemon --stacktrace assembleDebug
+          gradle --no-daemon --stacktrace assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/build-logs/gradle-build.log"
 
       - name: Collect APK
         shell: bash
         run: |
           set -euo pipefail
-
-          APK="$(find "$PROJECT_ROOT" -path '*/build/outputs/apk/debug/*.apk' -print -quit)"
+          APK="$(find "$PROJECT_ROOT" -path '*/build/outputs/apk/debug/*.apk' -print | head -n 1)"
 
           if [ -z "$APK" ]; then
             echo "::error::APK not found"
             exit 1
           fi
 
-          mkdir -p dist
-          cp "$APK" dist/SundraEditsCRM-debug.apk
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/SundraEditsCRM-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -204,11 +130,12 @@ jobs:
           path: dist/SundraEditsCRM-debug.apk
           if-no-files-found: error
 
-      - name: Upload logs on failure
+      - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: |
+            build-logs/
             ${{ runner.temp }}/project/**/build/reports/**
           if-no-files-found: warn
