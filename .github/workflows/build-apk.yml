@@ -15,6 +15,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -27,68 +28,155 @@ jobs:
 
       - name: Accept Android SDK licenses
         shell: bash
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: Prepare project (safe ZIP extraction)
+      - name: Prepare project and fix Kotlin errors
         shell: bash
         run: |
           set -euo pipefail
+
           WORK="$RUNNER_TEMP/project"
           rm -rf "$WORK"
           mkdir -p "$WORK" "$GITHUB_WORKSPACE/build-logs"
 
+          # Extract project ZIP safely
           if [ -f Sundra_Client_CRM_Project.zip ]; then
-            echo "Using Sundra_Client_CRM_Project.zip"
+            echo "Using project ZIP"
+
             if unzip -Z1 Sundra_Client_CRM_Project.zip | grep -Eq '(^/|^[A-Za-z]:|(^|/)\.\.(/|$))'; then
-              echo "::error::ZIP contains unsafe paths (absolute or ..). Refusing to extract."
+              echo "::error::Unsafe ZIP paths detected"
               exit 1
             fi
+
             unzip -q Sundra_Client_CRM_Project.zip -d "$WORK"
+
             if [ -n "$(find "$WORK" -type l -print -quit)" ]; then
-              echo "::error::ZIP contains symbolic links. Refusing to build."
+              echo "::error::ZIP contains symbolic links"
               exit 1
             fi
+
           elif [ -d android-project ]; then
-            echo "ZIP not found; using android-project/ folder from the repository"
+            echo "Using android-project folder"
             mkdir -p "$WORK/android-project"
             cp -a android-project/. "$WORK/android-project/"
           else
-            echo "::error::Sundra_Client_CRM_Project.zip is missing from the repository root (and no android-project/ folder exists)."
+            echo "::error::Project ZIP or android-project folder missing"
             exit 1
           fi
 
-          ROOT="$(find "$WORK" -maxdepth 4 \( -name settings.gradle.kts -o -name settings.gradle \) -print | head -n 1 | xargs -r dirname)"
-          if [ -z "$ROOT" ] || [ ! -f "$ROOT/app/build.gradle.kts" -a ! -f "$ROOT/app/build.gradle" ]; then
-            echo "::error::Could not find the Android Gradle project root (settings.gradle.kts + app/ module)."
+          # Locate Android project root
+          ROOT="$(find "$WORK" -maxdepth 5 \( -name settings.gradle.kts -o -name settings.gradle \) -print | head -n 1 | xargs -r dirname)"
+
+          if [ -z "$ROOT" ]; then
+            echo "::error::Android project root not found"
             exit 1
           fi
+
+          if [ ! -f "$ROOT/app/build.gradle.kts" ] && [ ! -f "$ROOT/app/build.gradle" ]; then
+            echo "::error::Android app module not found"
+            exit 1
+          fi
+
           echo "Project root: $ROOT"
+
+          # Fix Glass.kt
+          GLASS="$ROOT/app/src/main/java/com/sundraedits/crm/ui/Glass.kt"
+
+          if [ -f "$GLASS" ]; then
+            python3 - "$GLASS" <<'PY'
+          import sys
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              text = f.read()
+
+          # Replace matchParentSize with fillMaxSize
+          text = text.replace(".matchParentSize()", ".fillMaxSize()")
+
+          # Remove old matchParentSize import
+          text = text.replace(
+              "import androidx.compose.foundation.layout.matchParentSize\n",
+              ""
+          )
+
+          # Ensure fillMaxSize import exists
+          if "import androidx.compose.foundation.layout.fillMaxSize" not in text:
+              text = text.replace(
+                  "import androidx.compose.foundation.layout.Box\n",
+                  "import androidx.compose.foundation.layout.Box\n"
+                  "import androidx.compose.foundation.layout.fillMaxSize\n"
+              )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(text)
+
+          print("Glass.kt patched")
+          PY
+          fi
+
+          # Fix Settings.kt
+          SETTINGS="$ROOT/app/src/main/java/com/sundraedits/crm/ui/Settings.kt"
+
+          if [ -f "$SETTINGS" ]; then
+            python3 - "$SETTINGS" <<'PY'
+          import sys
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              text = f.read()
+
+          # Add missing dp import
+          if "import androidx.compose.ui.unit.dp" not in text:
+              text = text.replace(
+                  "import androidx.compose.ui.unit.sp\n",
+                  "import androidx.compose.ui.unit.sp\n"
+                  "import androidx.compose.ui.unit.dp\n"
+              )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(text)
+
+          print("Settings.kt patched")
+          PY
+          fi
+
+          # Save project root for next steps
           echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
 
       - name: Build debug APK
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$PROJECT_ROOT"
+
           gradle --no-daemon --stacktrace assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/build-logs/gradle-build.log"
 
       - name: Collect APK
         shell: bash
         run: |
           set -euo pipefail
-          APK="$(find "$PROJECT_ROOT" -path '*/build/outputs/apk/debug/*.apk' -print | head -n 1)"
+
+          APK="$(find "$PROJECT_ROOT" -path '*/build/outputs/apk/debug/*.apk' -print -quit)"
+
           if [ -z "$APK" ]; then
-            echo "::error::Gradle finished but no debug APK was produced."
+            echo "::error::APK not found"
             exit 1
           fi
+
           mkdir -p "$GITHUB_WORKSPACE/dist"
+
           cp "$APK" "$GITHUB_WORKSPACE/dist/SundraEditsCRM-debug.apk"
-          ls -l "$GITHUB_WORKSPACE/dist"
+
+          ls -lh "$GITHUB_WORKSPACE/dist"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -97,7 +185,7 @@ jobs:
           path: dist/SundraEditsCRM-debug.apk
           if-no-files-found: error
 
-      - name: Upload build logs (on failure)
+      - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
